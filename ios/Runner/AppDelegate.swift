@@ -35,6 +35,11 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
     private var modelName = "", modelVersion = ""
     private var fps = 3.0, threshold: Float = 0.10, cooldown = 5.0
     private var lastFrame = 0.0, lastCandidate = 0.0
+    // Access only on captureQueue, including cancellation while permissions are pending.
+    private var startGeneration = 0
+    private var running = false
+    // Location permission completion is owned by the main thread.
+    private var locationPermissionCompletion: ((Bool) -> Void)?
     private var recentLocations: [[String: Any]] = []
     private let formatter: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f
@@ -53,11 +58,42 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
     private func emit(_ event: [String: Any]) { DispatchQueue.main.async { self.sink?(event) } }
     @objc private func interrupted() { stop(); emit(["type": "error", "message": "Camera interrupted. Return to the app and restart collection."]) }
     func start(_ options: [String: Any], result: @escaping FlutterResult) {
-        location.requestWhenInUseAuthorization()
+        captureQueue.async {
+            self.startGeneration += 1
+            let generation = self.startGeneration
+            DispatchQueue.main.async {
+                self.requestCamera(options, generation: generation, result: result)
+            }
+        }
+    }
+    private func requestCamera(_ options: [String: Any], generation: Int, result: @escaping FlutterResult) {
         AVCaptureDevice.requestAccess(for: .video) { granted in
             guard granted else { DispatchQueue.main.async { result(FlutterError(code: "CAMERA_PERMISSION", message: "Camera access is required.", details: nil)) }; return }
-            self.captureQueue.async {
+            DispatchQueue.main.async {
+                let completion: (Bool) -> Void = { allowed in
+                    guard allowed else {
+                        result(FlutterError(code: "LOCATION_PERMISSION", message: "Location access is required to collect road evidence.", details: nil))
+                        return
+                    }
+                    self.configureCapture(options, generation: generation, result: result)
+                }
+                if self.location.authorizationStatus == .notDetermined {
+                    self.locationPermissionCompletion?(false)
+                    self.locationPermissionCompletion = completion
+                    self.location.requestWhenInUseAuthorization()
+                } else {
+                    completion(self.location.authorizationStatus == .authorizedAlways || self.location.authorizationStatus == .authorizedWhenInUse)
+                }
+            }
+        }
+    }
+    private func configureCapture(_ options: [String: Any], generation: Int, result: @escaping FlutterResult) {
+        self.captureQueue.async {
                 do {
+                    guard generation == self.startGeneration else {
+                        DispatchQueue.main.async { result(FlutterError(code: "CAPTURE_CANCELLED", message: "Collection was cancelled.", details: nil)) }
+                        return
+                    }
                     self.fps = max(1, min(10, (options["fps"] as? NSNumber)?.doubleValue ?? 3))
                     self.threshold = max(0, min(1, (options["threshold"] as? NSNumber)?.floatValue ?? 0.10))
                     self.cooldown = max(1, (options["cooldownSeconds"] as? NSNumber)?.doubleValue ?? 5)
@@ -73,6 +109,11 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
                         self.modelName = name; self.modelVersion = version
                         self.model = try VNCoreMLModel(for: ml)
                     }
+                    // Supply NMS inputs explicitly; changing the Dart threshold must also
+                    // affect Core ML, otherwise detections can be discarded before Vision.
+                    self.model?.featureProvider = try MLDictionaryFeatureProvider(dictionary: [
+                        "confidenceThreshold": Double(self.threshold), "iouThreshold": 0.7
+                    ])
                     if self.session.inputs.isEmpty {
                         self.session.beginConfiguration()
                         defer { self.session.commitConfiguration() }
@@ -90,13 +131,15 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
                         guard self.session.canAddOutput(output) else { throw NSError(domain: "Camera", code: 5) }
                         self.session.addOutput(output)
                     }
+                    self.lastFrame = 0; self.lastCandidate = 0
+                    self.recentLocations.removeAll()
                     self.session.startRunning()
+                    self.running = self.session.isRunning
                     DispatchQueue.main.async {
                         UIApplication.shared.isIdleTimerDisabled = true
                         self.location.startUpdatingLocation(); result(nil)
                     }
                 } catch { DispatchQueue.main.async { result(FlutterError(code: "CAPTURE_SETUP", message: error.localizedDescription, details: nil)) } }
-            }
         }
     }
     func recover(result: @escaping FlutterResult) {
@@ -117,15 +160,29 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
         }
     }
     func stop() {
-        captureQueue.async { self.session.stopRunning() }
-        DispatchQueue.main.async { self.location.stopUpdatingLocation(); UIApplication.shared.isIdleTimerDisabled = false }
+        captureQueue.async { self.startGeneration += 1; self.running = false; self.session.stopRunning() }
+        DispatchQueue.main.async {
+            let completion = self.locationPermissionCompletion
+            self.locationPermissionCompletion = nil
+            completion?(false)
+            self.location.stopUpdatingLocation(); UIApplication.shared.isIdleTimerDisabled = false
+        }
     }
     func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        if manager.authorizationStatus != .notDetermined {
+            let completion = locationPermissionCompletion
+            locationPermissionCompletion = nil
+            completion?(manager.authorizationStatus == .authorizedAlways || manager.authorizationStatus == .authorizedWhenInUse)
+        }
         if manager.authorizationStatus == .denied || manager.authorizationStatus == .restricted {
+            stop()
             emit(["type": "error", "message": "Location access is required. Enable it in Settings."])
         }
     }
     func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
+        // A temporary unavailable fix is common during GPS acquisition.
+        if (error as? CLError)?.code == .locationUnknown { return }
+        stop()
         emit(["type": "error", "message": "Location unavailable: \(error.localizedDescription)"])
     }
     func locationManager(_ manager: CLLocationManager, didUpdateLocations locations: [CLLocation]) {
@@ -146,7 +203,7 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
     }
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         let monotonic = CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock()))
-        guard monotonic - lastFrame >= 1/fps, monotonic - lastCandidate >= cooldown,
+        guard running, monotonic - lastFrame >= 1/fps, monotonic - lastCandidate >= cooldown,
               let pixel = CMSampleBufferGetImageBuffer(sampleBuffer), let model = model else { return }
         lastFrame = monotonic
         // Convert the camera's host-clock presentation timestamp to wall time before inference.
@@ -154,7 +211,7 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
         let at = Date().addingTimeInterval(pts - monotonic)
         do {
             let request = VNCoreMLRequest(model: model)
-            request.imageCropAndScaleOption = .scaleFill
+            request.imageCropAndScaleOption = .scaleFit
             try VNImageRequestHandler(cvPixelBuffer: pixel, orientation: .right).perform([request])
             guard let results = request.results as? [VNRecognizedObjectObservation] else {
                 throw NSError(domain: "Roadwatch", code: 6, userInfo: [NSLocalizedDescriptionKey: "Model must return Vision object observations. Export with NMS enabled."])
@@ -187,6 +244,9 @@ final class CameraPreview: UIView, FlutterPlatformView {
         super.init(frame: frame)
         let preview = layer as! AVCaptureVideoPreviewLayer
         preview.session = session; preview.videoGravity = .resizeAspectFill
+        if preview.connection?.isVideoOrientationSupported == true {
+            preview.connection?.videoOrientation = .portrait
+        }
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     func view() -> UIView { self }

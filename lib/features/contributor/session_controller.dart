@@ -11,17 +11,21 @@ import 'upload_service.dart';
 enum SessionState { idle, requestingPermissions, gpsCalibrating, collecting, cameraInterrupted, gpsDegraded, storageFull, finished }
 
 class SessionController extends ChangeNotifier {
+  SessionController({EvidenceQueue? evidenceQueue}) : queue = evidenceQueue ?? EvidenceQueue();
   static const native = MethodChannel('road_hazard/control');
   static const events = EventChannel('road_hazard/events');
   static final maxAccuracy = double.parse(const String.fromEnvironment('MAX_ACCURACY_METERS', defaultValue: '30'));
   final trajectory = TrajectoryBuffer();
-  final queue = EvidenceQueue();
+  final EvidenceQueue queue;
   late UploadService uploader;
   SessionState state = SessionState.idle;
   String message = 'Mount your phone with a clear view of the road.';
   LocationFix? fix;
   int queued = 0, captured = 0;
   bool ready = false, _handling = false, _active = false;
+  bool _starting = false, _disposed = false;
+  int _startGeneration = 0;
+  bool get isActive => _active;
   Timer? _timer;
   StreamSubscription<dynamic>? _subscription;
   final _uuid = const Uuid();
@@ -36,6 +40,7 @@ class SessionController extends ChangeNotifier {
     final auth = await secure.read(key: 'authorization');
     if (url != null && auth != null) uploader.configure(url, auth);
     _subscription = events.receiveBroadcastStream().listen(_onEvent, onError: (Object error) {
+      _active = false; _starting = false; _startGeneration++;
       message = '$error'; state = SessionState.cameraInterrupted; notifyListeners();
     });
     _timer = Timer.periodic(const Duration(seconds: 5), (_) async {
@@ -56,22 +61,31 @@ class SessionController extends ChangeNotifier {
     await uploader.flush();
   }
   Future<void> start() async {
-    if (!ready || _active) return;
-    if (!await queue.hasRoom()) { state = SessionState.storageFull; notifyListeners(); return; }
+    if (!ready || _active || _starting || _disposed) return;
+    _starting = true;
+    final generation = ++_startGeneration;
     state = SessionState.requestingPermissions; notifyListeners();
     try {
+      if (!await queue.hasRoom()) { state = SessionState.storageFull; return; }
+      if (generation != _startGeneration || _disposed) return;
       await native.invokeMethod<void>('start', {
         'fps': const int.fromEnvironment('DETECTION_FPS', defaultValue: 3),
         'threshold': double.parse(const String.fromEnvironment('DETECTION_THRESHOLD', defaultValue: '0.10')),
         'cooldownSeconds': const int.fromEnvironment('DETECTION_COOLDOWN_SECONDS', defaultValue: 5),
       });
+      if (generation != _startGeneration || _disposed) return;
       _active = true; state = SessionState.gpsCalibrating;
       message = 'Waiting for an accurate GPS fix. Keep this screen open.';
-    } catch (error) { state = SessionState.cameraInterrupted; message = '$error'; }
-    notifyListeners();
+    } catch (error) {
+      if (generation == _startGeneration) { state = SessionState.cameraInterrupted; message = '$error'; }
+    } finally {
+      if (generation == _startGeneration) _starting = false;
+      notifyListeners();
+    }
   }
   Future<void> stop({bool interrupted = false}) async {
     _active = false;
+    _starting = false; _startGeneration++;
     await native.invokeMethod<void>('stop');
     state = interrupted ? SessionState.cameraInterrupted : SessionState.finished;
     message = interrupted ? 'Collection paused. Return to the foreground and start again.' : 'Session finished. Pending evidence will keep retrying.';
@@ -85,6 +99,7 @@ class SessionController extends ChangeNotifier {
       notifyListeners(); return;
     }
     if (data['type'] == 'error') {
+      _active = false; _starting = false; _startGeneration++;
       message = data['message'] as String; state = SessionState.cameraInterrupted; notifyListeners(); return;
     }
     if (data['type'] != 'candidate') return;
@@ -124,5 +139,6 @@ class SessionController extends ChangeNotifier {
   Future<void> _discard(String path) async {
     for (final name in [path, '$path.json']) { final file = File(name); if (await file.exists()) await file.delete(); }
   }
-  @override void dispose() { _timer?.cancel(); _subscription?.cancel(); if (ready) uploader.dispose(); super.dispose(); }
+  @override void notifyListeners() { if (!_disposed) super.notifyListeners(); }
+  @override void dispose() { _disposed = true; _startGeneration++; _timer?.cancel(); _subscription?.cancel(); if (ready) uploader.dispose(); super.dispose(); }
 }

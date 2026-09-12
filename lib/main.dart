@@ -29,7 +29,10 @@ class _ContributorScreenState extends State<ContributorScreen> with WidgetsBindi
     session.initialize().catchError((Object error) { session.message = 'Setup failed: $error'; if (mounted) setState(() {}); });
   }
   @override void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.inactive || state == AppLifecycleState.paused) session.stop(interrupted: true);
+    // iOS permission dialogs temporarily make the app inactive during Start.
+    if (state == AppLifecycleState.paused || (state == AppLifecycleState.inactive && session.isActive)) {
+      session.stop(interrupted: true);
+    }
   }
   @override void dispose() { WidgetsBinding.instance.removeObserver(this); session.dispose(); super.dispose(); }
   Future<void> settings() async {
@@ -75,7 +78,7 @@ class _ContributorScreenState extends State<ContributorScreen> with WidgetsBindi
         Text(session.message, style: const TextStyle(color: Color(0xFFB0BDB4), height: 1.5)),
         const SizedBox(height: 24),
         SizedBox(width: double.infinity, height: 56, child: FilledButton.icon(
-          onPressed: !session.ready ? null : active ? () => session.stop() : () => session.start(),
+          onPressed: !session.ready || session.state == SessionState.requestingPermissions ? null : active ? () => session.stop() : () => session.start(),
           icon: Icon(active ? Icons.stop_rounded : Icons.play_arrow_rounded), label: Text(active ? 'Finish collection' : 'Start collection'))),
         const SizedBox(height: 18), const Text('Set up while parked. Keep the phone mounted and the app visible. Images are removed after receipt; verification happens on the server.',
           style: TextStyle(fontSize: 12, height: 1.5, color: Colors.white54)),
