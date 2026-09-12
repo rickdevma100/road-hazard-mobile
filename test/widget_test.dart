@@ -1,12 +1,16 @@
 import 'dart:async';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:road_hazard/features/contributor/evidence_queue.dart';
 import 'package:road_hazard/features/contributor/session_controller.dart';
 import 'package:road_hazard/features/contributor/upload_service.dart';
 
 class MemoryQueue extends EvidenceQueue {
   bool room = true;
+  @override Future<void> open() async {}
+  @override Future<int> count() async => 0;
+  @override Future<List<Map<String, Object?>>> pending() async => [];
   @override Future<bool> hasRoom() async => room;
 }
 
@@ -23,6 +27,8 @@ void main() {
     session.dispose();
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(SessionController.native, null);
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(const MethodChannel('road_hazard/events'), null);
   });
   test('one native start while permission prompt is pending', () async {
     final pending = Completer<void>();
@@ -74,5 +80,23 @@ void main() {
     await session.start();
     expect(session.state, SessionState.storageFull);
     expect(session.isActive, isFalse);
+  });
+  test('native interruption permits restart through the event channel', () async {
+    FlutterSecureStorage.setMockInitialValues({});
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(const MethodChannel('road_hazard/events'), (_) async => null);
+    messenger.setMockMethodCallHandler(SessionController.native, (call) async => call.method == 'recover' ? [] : null);
+    session.uploader.dispose();
+    await session.initialize();
+    await session.start();
+    expect(session.isActive, isTrue);
+    final delivered = Completer<void>();
+    messenger.handlePlatformMessage('road_hazard/events',
+        const StandardMethodCodec().encodeSuccessEnvelope({'type': 'error', 'message': 'Camera interrupted'}),
+        (_) => delivered.complete());
+    await delivered.future;
+    expect(session.isActive, isFalse);
+    await session.start();
+    expect(session.isActive, isTrue);
   });
 }

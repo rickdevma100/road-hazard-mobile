@@ -136,6 +136,10 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
                     self.session.startRunning()
                     self.running = self.session.isRunning
                     DispatchQueue.main.async {
+                        guard self.captureQueue.sync(execute: { generation == self.startGeneration && self.running }) else {
+                            result(FlutterError(code: "CAPTURE_CANCELLED", message: "Collection was cancelled before the camera started.", details: nil))
+                            return
+                        }
                         UIApplication.shared.isIdleTimerDisabled = true
                         self.location.startUpdatingLocation(); result(nil)
                     }
@@ -149,7 +153,9 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
                 let files = (try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)) ?? []
                 var recovered: [[String: Any]] = []
                 for file in files where file.pathExtension == "json" {
-                    var event = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as! [String: Any]
+                    guard var event = try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any] else {
+                        throw NSError(domain: "Roadwatch", code: 7, userInfo: [NSLocalizedDescriptionKey: "Stored capture journal is invalid."])
+                    }
                     if let path = event["path"] as? String, FileManager.default.fileExists(atPath: path) {
                         event["recovered"] = true; recovered.append(event)
                     } else { try FileManager.default.removeItem(at: file) }
