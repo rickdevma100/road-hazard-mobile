@@ -33,7 +33,7 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
     private var sink: FlutterEventSink?
     private var model: VNCoreMLModel?
     private var modelName = "", modelVersion = ""
-    private var fps = 3.0, threshold: Float = 0.65, cooldown = 5.0
+    private var fps = 3.0, threshold: Float = 0.10, cooldown = 5.0
     private var lastFrame = 0.0, lastCandidate = 0.0
     private var recentLocations: [[String: Any]] = []
     private let formatter: ISO8601DateFormatter = {
@@ -59,7 +59,7 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
             self.captureQueue.async {
                 do {
                     self.fps = max(1, min(10, (options["fps"] as? NSNumber)?.doubleValue ?? 3))
-                    self.threshold = max(0, min(1, (options["threshold"] as? NSNumber)?.floatValue ?? 0.65))
+                    self.threshold = max(0, min(1, (options["threshold"] as? NSNumber)?.floatValue ?? 0.10))
                     self.cooldown = max(1, (options["cooldownSeconds"] as? NSNumber)?.doubleValue ?? 5)
                     if self.model == nil {
                         guard let url = Bundle.main.url(forResource: "RoadHazard", withExtension: "mlmodelc") else {
@@ -159,7 +159,9 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
             guard let results = request.results as? [VNRecognizedObjectObservation] else {
                 throw NSError(domain: "Roadwatch", code: 6, userInfo: [NSLocalizedDescriptionKey: "Model must return Vision object observations. Export with NMS enabled."])
             }
-            guard let candidate = results.compactMap({ $0.labels.first }).filter({ $0.confidence >= threshold }).max(by: { $0.confidence < $1.confidence }) else { return }
+            guard let candidate = results.compactMap({ $0.labels.first }).filter({
+                $0.identifier.caseInsensitiveCompare("Pothole") == .orderedSame && $0.confidence >= threshold
+            }).max(by: { $0.confidence < $1.confidence }) else { return }
             let image = CIImage(cvPixelBuffer: pixel).oriented(.right)
             guard let cg = context.createCGImage(image, from: image.extent), let jpeg = UIImage(cgImage: cg).jpegData(compressionQuality: 0.8) else { return }
             let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("capture", isDirectory: true)

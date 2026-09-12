@@ -9,7 +9,7 @@ flutter test test/location_test.dart
 open ios/Runner.xcworkspace
 ```
 
-In Xcode, choose your signing team and a unique bundle identifier. Add a **road-damage Core ML object detector** named `RoadHazard.mlpackage` or `RoadHazard.mlmodel` to the Runner target. It must expose object observations (NMS enabled) and creator metadata `modelName` and `modelVersion`. See [https://github.com/rickdevma100/road-hazard-ml/blob/main/README.md](https://github.com/rickdevma100/road-hazard-ml/blob/main/README.md). No trained model is bundled. Without one, Start reports a setup error and does not pretend to detect hazards.
+The app includes `RoadHazard.mlpackage`, an NMS-enabled Core ML YOLOv12s detector fine-tuned with India-labelled RDD2022 road-damage images. Xcode compiles it into `RoadHazard.mlmodelc` when you build the Runner target. It detects four classes—longitudinal crack, transverse crack, alligator crack, and pothole—but the contributor capture flow creates reports only for the `Pothole` class. Model provenance, licensing, evaluation limits, and the artifact hash are recorded in [the ML model descriptor](https://github.com/rickdevma100/road-hazard-ml/blob/main/model-descriptor.json).
 
 Then run `flutter run` on the phone. Open Server settings, enter an HTTPS API origin and `Bearer <access-token>`. Use a token with the configured audience and `contributor:write` scope. Values are kept in Keychain. The prototype expects token renewal through these settings; a provider-specific login/refresh UI remains to be connected. Never supply credentials through `--dart-define` or commit them.
 
@@ -18,7 +18,7 @@ A debug simulator build may use `http://localhost:8080` and a Basic header for d
 Configuration examples:
 
 ```sh
-flutter run --dart-define=DETECTION_FPS=3 --dart-define=DETECTION_THRESHOLD=0.65 \
+flutter run --dart-define=DETECTION_FPS=3 --dart-define=DETECTION_THRESHOLD=0.10 \
   --dart-define=MAX_ACCURACY_METERS=30 --dart-define=MAX_QUEUE_ITEMS=100
 ```
 

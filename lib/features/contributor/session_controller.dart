@@ -62,7 +62,7 @@ class SessionController extends ChangeNotifier {
     try {
       await native.invokeMethod<void>('start', {
         'fps': const int.fromEnvironment('DETECTION_FPS', defaultValue: 3),
-        'threshold': double.parse(const String.fromEnvironment('DETECTION_THRESHOLD', defaultValue: '0.65')),
+        'threshold': double.parse(const String.fromEnvironment('DETECTION_THRESHOLD', defaultValue: '0.10')),
         'cooldownSeconds': const int.fromEnvironment('DETECTION_COOLDOWN_SECONDS', defaultValue: 5),
       });
       _active = true; state = SessionState.gpsCalibrating;

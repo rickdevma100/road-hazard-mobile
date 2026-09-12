@@ -16,4 +16,7 @@ __pycache__/
 *.mlmodel
 *.mlmodelc/
 *.mlpackage/
+!ios/Runner/Models/
+!ios/Runner/Models/RoadHazard.mlpackage/
+!ios/Runner/Models/RoadHazard.mlpackage/**
 *.osm.pbf
