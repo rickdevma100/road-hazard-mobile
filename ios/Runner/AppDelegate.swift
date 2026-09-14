@@ -222,9 +222,16 @@ final class RoadCollector: NSObject, FlutterStreamHandler, CLLocationManagerDele
             guard let results = request.results as? [VNRecognizedObjectObservation] else {
                 throw NSError(domain: "Roadwatch", code: 6, userInfo: [NSLocalizedDescriptionKey: "Model must return Vision object observations. Export with NMS enabled."])
             }
-            guard let candidate = results.compactMap({ $0.labels.first }).filter({
-                $0.identifier.caseInsensitiveCompare("Pothole") == .orderedSame && $0.confidence >= threshold
-            }).max(by: { $0.confidence < $1.confidence }) else { return }
+            var bestCandidate: VNClassificationObservation?
+            for observation in results {
+                guard let label = observation.labels.first,
+                      label.identifier.caseInsensitiveCompare("Pothole") == ComparisonResult.orderedSame,
+                      label.confidence >= self.threshold else { continue }
+                if label.confidence > (bestCandidate?.confidence ?? -1) {
+                    bestCandidate = label
+                }
+            }
+            guard let candidate = bestCandidate else { return }
             let image = CIImage(cvPixelBuffer: pixel).oriented(.right)
             guard let cg = context.createCGImage(image, from: image.extent), let jpeg = UIImage(cgImage: cg).jpegData(compressionQuality: 0.8) else { return }
             let directory = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("capture", isDirectory: true)
